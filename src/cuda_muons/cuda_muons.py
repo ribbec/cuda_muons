@@ -11,6 +11,8 @@ from .utils_cuda_muons.get_geometry import (
 )
 from .utils_cuda_muons.get_magnetic_field import get_magnetic_field_from_params
 import faster_muons_torch
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 assert torch.cuda.is_available(), f"CUDA is not available. Torch version: {torch.__version__} \n Torch cuda version: {print(torch.version.cuda)}"
 
 import warnings
@@ -286,7 +288,7 @@ def propagate_one_step(
 def run_from_params(params,
     muons:np.array,
         sensitive_plane={'dz': 0.02, 'dx': 4, 'dy': 6, 'position': 82.0},
-        histogram_dir='data',
+        histogram_dir=DATA_DIR,
         save_dir = None,
         n_steps=5000,
         fSC_mag = False,
@@ -457,7 +459,7 @@ def run_from_params(params,
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--h',dest = 'histogram_dir', type=str, default='data/',
+    parser.add_argument('--h',dest = 'histogram_dir', type=str, default=DATA_DIR,
                         help='Path to the histogram file')
     parser.add_argument('-muons', '--f', dest='input_file', type=str, default="data/muons/full_sample_after_target.h5",
                         help='Path to input muon file (.npy, .pkl, .h5). If not provided a synthetic example will be used.')

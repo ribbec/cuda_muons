@@ -26,3 +26,6 @@ dist/*.whl
 
 # Fitted beam models are inputs, not outputs: keep them tracked despite data/*.pkl.
 !data/gmm/*.pkl
+
+# setuptools build tree
+build/
