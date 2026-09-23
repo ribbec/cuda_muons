@@ -7,7 +7,7 @@ import json
 import multiprocessing as mp
 import os
 from muon_slabs import simulate_muon, initialize, kill_secondary_tracks, collect_from_sensitive
-from get_geometry import get_sphere_design
+from cuda_muons.utils_cuda_muons.get_geometry import get_sphere_design
 import functools
 
 
