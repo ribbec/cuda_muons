@@ -95,7 +95,9 @@ def standardize_train_val(X_train, X_val):
 
 
 if __name__ == "__main__":
-    file_path = '/disk/users/cribbe/workspace/ship_rl/project/cuda_muons/data/full_sample.h5'
+    from . import sample_path
+
+    file_path = sample_path()
     data = get_real_muons(file_path)
     print(data.shape)
 

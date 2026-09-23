@@ -7,12 +7,13 @@ os.environ.setdefault('OMP_NUM_THREADS', '1')
 import numpy as np
 from time import time
 import torch
+from . import FIGS_DIR, GMM_DIR, sample_path
 from .utils import *
 from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm
 from sklearn.mixture import GaussianMixture
 
-figs_dir = '/disk/users/cribbe/workspace/ship_rl/logs/muons_generator/figs/'
+figs_dir = f"{FIGS_DIR}/"
 show = False
 
 
@@ -79,8 +80,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=500_000_000, help="Number of samples to use for training")
     parser.add_argument("--components", type=int, nargs="+", default=[2,4,8,16,24], help="List of number of GMM components to try")
     args = parser.parse_args()
+    FIGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    px,py,pz,_x,_y,z,pdg,weight = get_real_muons('/disk/users/cribbe/workspace/ship_rl/project/cuda_muons/data/full_sample.h5', num_samples = args.num_samples).T
+    px,py,pz,_x,_y,z,pdg,weight = get_real_muons(sample_path(), num_samples = args.num_samples).T
     pt = calc_pt(px, py)
     # Fit in log space (log pz, log1p pt) so the GMM models roughly-Gaussian features and
     # never generates negative momenta; sample_gmm applies the matching inverse.
@@ -120,6 +122,7 @@ if __name__ == "__main__":
         "mean": mean,
         "std": std,
     }
-    with open("/disk/users/cribbe/workspace/ship_rl/logs/muons_generator/gmm_model.pkl", "wb") as f:
+    GMM_DIR.mkdir(parents=True, exist_ok=True)
+    with open(GMM_DIR / "gmm_model.pkl", "wb") as f:
         pickle.dump(obj, f)
 

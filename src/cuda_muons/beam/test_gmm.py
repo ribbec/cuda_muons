@@ -1,5 +1,6 @@
 import numpy as np
 import pickle
+from . import FIGS_DIR, GMM_DIR
 from .train_gmm import sample_gmm
 from .see_data import hist2d
 import matplotlib.pyplot as plt
@@ -11,8 +12,9 @@ parser.add_argument("--num_samples", type=int, default=100_000, help="Number of 
 args = parser.parse_args()
 
 
-file_path = '/disk/users/cribbe/workspace/ship_rl/logs/muons_generator/gmm_model.pkl'
-figs_dir = '/disk/users/cribbe/workspace/ship_rl/logs/muons_generator/'
+file_path = GMM_DIR / "gmm_model.pkl"
+figs_dir = f"{FIGS_DIR}/"
+FIGS_DIR.mkdir(parents=True, exist_ok=True)
 show = True
 with open(file_path, 'rb') as f:
     gmm = pickle.load(f)

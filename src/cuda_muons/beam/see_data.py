@@ -1,9 +1,10 @@
 import numpy as np
+from . import FIGS_DIR, sample_path
 from .utils import *
 from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm
 
-figs_dir = '/disk/users/cribbe/workspace/ship_rl/logs/muons_generator/'
+figs_dir = f"{FIGS_DIR}/"
 show = False
 
 fontsize = 14
@@ -25,8 +26,9 @@ def hist2d(x,y, W = None):
     cbar1 = fig.colorbar(im1, ax=ax)
     return ax
 
-if __name__ == "__main__": 
-    px,py,pz,_x,_y,z,pdg,weight = get_real_muons('/disk/users/cribbe/workspace/ship_rl/project/cuda_muons/data/full_sample.h5').T
+if __name__ == "__main__":
+    FIGS_DIR.mkdir(parents=True, exist_ok=True)
+    px,py,pz,_x,_y,z,pdg,weight = get_real_muons(sample_path()).T
     pt = calc_pt(px, py)
     phi = calc_phi(px, py)
     x,y = generate_position(px.shape[0])
