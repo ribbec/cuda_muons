@@ -4,12 +4,12 @@ import pickle
 import torch
 import h5py
 import os
-from utils_cuda_muons.get_geometry import (
+from .utils_cuda_muons.get_geometry import (
     get_corners_from_params,
     get_cavern_from_params,
     create_z_axis_grid,
 )
-from utils_cuda_muons.get_magnetic_field import get_magnetic_field_from_params
+from .utils_cuda_muons.get_magnetic_field import get_magnetic_field_from_params
 import faster_muons_torch
 assert torch.cuda.is_available(), f"CUDA is not available. Torch version: {torch.__version__} \n Torch cuda version: {print(torch.version.cuda)}"
 
@@ -155,6 +155,132 @@ def propagate_muons_with_cuda(
     # Convert results back to numpy arrays and return (on CPU)
     return muons_positions_cuda.cpu(), muons_momenta_cuda.cpu()
 
+
+def sample_scatter(
+    muons_positions,
+    muons_momenta,
+    environment,          # Dict from set_environment (uniform-field path only)
+    use_symmetry: bool = True,
+    seed: int = 0,
+    device: str = 'cuda',
+    ):
+    """Sample the per-step multiple-scattering magnitudes WITHOUT moving the muons.
+
+    At each muon's CURRENT (position, momentum) this draws the longitudinal loss Δp_z and the
+    transverse-kick magnitude pt from the per-material alias histograms (the same draw the
+    propagation kernel would do internally), and returns them as two GPU tensors of shape (N,):
+    `(dpz, dsd)` = `(Δp_z, pt)`. Feed these straight back into `propagate_one_step(...,
+    dpz=dpz, dsd=dsd, seed=...)` so the proposal policy can condition its scatter azimuth on the
+    sampled pt before the kick is applied. Uniform-field path only.
+    """
+    if environment['use_field_map']:
+        raise NotImplementedError("sample_scatter supports the uniform-field path only.")
+
+    muons_positions = muons_positions.contiguous().to(device=device, dtype=torch.float32)
+    muons_momenta = muons_momenta.contiguous().to(device=device, dtype=torch.float32)
+
+    (arb8s_fields,) = environment['field_args']
+
+    n = muons_positions.size(0)
+    dpz = torch.empty(n, device=device, dtype=torch.float32)
+    dsd = torch.empty(n, device=device, dtype=torch.float32)
+
+    faster_muons_torch.sample_scatter_uniform_field(
+        muons_positions,
+        muons_momenta,
+        environment['material_histograms_cuda'],
+        environment['arb8_corners'],
+        environment['cells_arb8'],
+        environment['hashed_arb8'],
+        arb8s_fields,
+        environment['cavern_params'],
+        use_symmetry,
+        seed,
+        dpz,
+        dsd,
+    )
+
+    return dpz, dsd
+
+
+def propagate_one_step(
+    muons_positions,
+    muons_momenta,
+    muons_charge,
+    environment,          # Dict from set_environment (uniform-field path only)
+    phi,                  # (N,) azimuthal scatter angle per muon [rad]
+    sensitive_plane_z: float,
+    step_length_fixed: float = 0.02,
+    use_symmetry: bool = True,
+    kill_at: float = 0.18,
+    seed: int = 0,
+    device: str = 'cuda',
+    dpz=None,             # (N,) pre-sampled Δp_z per muon (from sample_scatter), or None
+    dsd=None,             # (N,) pre-sampled pt per muon (from sample_scatter), or None
+    ):
+    """Advance muons by exactly ONE propagation step on the GPU.
+
+    Unlike `propagate_muons_with_cuda` (which loops all steps internally and samples the
+    scatter azimuth uniformly), this calls the kernel with `num_steps=1` and injects an
+    externally supplied azimuthal angle `phi` (the AIS proposal knob). The histogram
+    magnitude sampling, material lookup, RK4 field integration and termination logic are
+    identical to the multi-step kernel.
+
+    If `dpz` and `dsd` are supplied (e.g. from a prior `sample_scatter` call) the kernel uses
+    those pre-sampled magnitudes and skips the histogram draw, so the agent's `phi` is applied
+    to a kick whose size it already saw. With `dpz=dsd=None` the kernel samples the magnitudes
+    internally (original behaviour).
+
+    Tensors are mutated IN PLACE and kept on `device` (no CPU round-trip), so a Python
+    rollout loop can call this repeatedly while keeping muon state resident on the GPU.
+    Only the uniform-field path is supported. Returns the (same, GPU-resident) position
+    and momentum tensors so the caller can re-bind them after any dtype/device coercion.
+
+    NOTE: the per-step kernel re-uploads field constants and rebuilds the ARB8 device
+    buffer on every call; for long single-step rollouts this setup overhead dominates and
+    is the obvious target for a future optimisation (cache them inside `set_environment`).
+    """
+    if environment['use_field_map']:
+        raise NotImplementedError("propagate_one_step supports the uniform-field path only.")
+
+    # Kernel assumes contiguous (N, 3) float32 layout (see propagate_muons_with_cuda).
+    muons_positions = muons_positions.contiguous().to(device=device, dtype=torch.float32)
+    muons_momenta = muons_momenta.contiguous().to(device=device, dtype=torch.float32)
+    muons_charge = muons_charge.contiguous().to(device=device, dtype=torch.float32)
+    phi = phi.contiguous().to(device=device, dtype=torch.float32)
+
+    # Empty tensors -> nullptr on the C++ side -> in-kernel magnitude sampling.
+    if dpz is None or dsd is None:
+        dpz_t = torch.empty(0, device=device, dtype=torch.float32)
+        dsd_t = torch.empty(0, device=device, dtype=torch.float32)
+    else:
+        dpz_t = dpz.contiguous().to(device=device, dtype=torch.float32)
+        dsd_t = dsd.contiguous().to(device=device, dtype=torch.float32)
+
+    (arb8s_fields,) = environment['field_args']
+
+    faster_muons_torch.propagate_muons_one_step_uniform_field(
+        muons_positions,
+        muons_momenta,
+        muons_charge,
+        environment['material_histograms_cuda'],
+        environment['arb8_corners'],
+        environment['cells_arb8'],
+        environment['hashed_arb8'],
+        arb8s_fields,
+        environment['cavern_params'],
+        use_symmetry,
+        sensitive_plane_z,
+        kill_at,
+        1,                       # num_steps: exactly one step
+        step_length_fixed,
+        seed,
+        phi,
+        dpz_t,
+        dsd_t,
+    )
+
+    return muons_positions, muons_momenta
 
 
 def run_from_params(params,
@@ -339,7 +465,7 @@ if __name__ == '__main__':
                         help='Maximum number of muons to load from the input file; 0 means all')
     parser.add_argument('--n_steps', type=int, default=5000,
                         help='Number of steps for simulation')
-    parser.add_argument("-sens_plane", type=float, nargs='+', default=[82], help="Position(s) of the sensitive plane in z (m), 0 means no sensitive plane. Can specify multiple values separated by space.")
+    parser.add_argument("-sens_plane", type=float, nargs='+', default=[82, 91], help="Position(s) of the sensitive plane in z (m), 0 means no sensitive plane. Can specify multiple values separated by space.")
     parser.add_argument("-remove_cavern", dest="add_cavern", action='store_false', help="Remove the cavern from simulation")
     parser.add_argument('-plot', action='store_true',
                         help='Plot histograms')
@@ -348,6 +474,7 @@ if __name__ == '__main__':
     parser.add_argument("-params", type=str, default='tokanut_v5.txt', help="Magnet parameters configuration - name or file path. If 'input', will prompt for input.")
     parser.add_argument('--gpu', dest='gpu', type=int, default=0,
                         help='GPU index to use (e.g., 0, 1, ...).')
+    parser.add_argument("-save_dir", type=str, default='/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons')
     args = parser.parse_args()
     
     if args.params == 'input':
@@ -378,7 +505,7 @@ if __name__ == '__main__':
                 weight = f['weight'][: args.n_muons] if args.n_muons > 0 else f['weight'][:]
                 muons = np.stack([px, py, pz, x, y, z, pdg, weight], axis=1).astype(np.float64)
     print(f"Loaded {muons.shape[0]} muons. Took {time.time() - time0:.2f} seconds to load.")
-    dx, dy = 9.0, 6.0
+    dx, dy = 4.0, 6.0  #9.0, 6.0
     
     sensitive_film_params = [{'dz': 0.0001, 'dx': dx, 'dy': dy, 'position':pos} for pos in args.sens_plane] if args.sens_plane is not None else None
     t_run_start = time.time()
@@ -387,12 +514,12 @@ if __name__ == '__main__':
                  fSC_mag=False, NI_from_B=True, 
                  use_diluted=False, add_cavern=args.add_cavern,
                  field_map_file=None, use_uniform_field=not args.use_field_map,
-                 save_dir="data/outputs/outputs_cuda.pkl",
+                 save_dir=f"{args.save_dir}/outputs_cuda.pkl",
                  device=args.gpu)
     print(f"Run completed in {time.time() - t_run_start:.2f} seconds.")
     if args.plot:
         import matplotlib.pyplot as plt
-        out_dir = "plots/outputs"
+        out_dir = args.save_dir
 
         os.makedirs(out_dir, exist_ok=True)
         input_data = {

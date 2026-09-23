@@ -70,6 +70,7 @@ static __constant__ float BIG_STEP = 0.2f;
 static __constant__ float LOG_START;
 static __constant__ float LOG_STOP;
 static __constant__ float INV_LOG_STEP;
+static __constant__ int   MAX_MOMENTUM_BIN;   // = N_momentum_bins - 1; upper clamp for get_first_bin
 static __device__ __constant__ bool _use_symmetry = true;
 static __constant__ FieldMeta d_field_meta;
 static __constant__ ZGridMeta d_grid_meta;
@@ -148,7 +149,9 @@ static __device__ __forceinline__ int get_first_bin(float num) {
     num = fmaxf(0.18f, num);
     num = fminf(400.0f, num);
     int index = static_cast<int>((log10f(num) - LOG_START) * INV_LOG_STEP);
-    return index;
+    // |p| clamped to 400 lands on index == N_momentum_bins (one past the last row),
+    // which would read past the histogram table -> illegal memory access. Clamp it.
+    return max(0, min(index, MAX_MOMENTUM_BIN));
 }
 
 static __device__ __forceinline__ float3 getFieldAt(const float *field,

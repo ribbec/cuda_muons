@@ -110,6 +110,152 @@ __device__ MaterialType get_material_with_arb8_idx(
 }
 
 
+// Draw a single multiple-scattering sample (longitudinal loss `delta` = Δp_z and transverse
+// kick magnitude `delta_second_dim` = pt) from the per-material alias histograms. Factored
+// out of the propagate kernel so the sample-only kernel below can reuse the exact same RNG draw
+// order (rand_value supplied by the caller, then tbin, then the two jitters) — this keeps the
+// nominal in-kernel sampling path byte-identical to the original code.
+static __device__ __forceinline__ void sample_scatter_magnitudes(
+    float mag_P,
+    int hist_idx,
+    MaterialType material,
+    float rand_value,
+    int H_2d,
+    const float* hist_2d_probability_table_iron,
+    const int* hist_2d_alias_table_iron,
+    const float* hist_2d_bin_centers_first_dim_iron,
+    const float* hist_2d_bin_centers_second_dim_iron,
+    const float* hist_2d_bin_widths_first_dim_iron,
+    const float* hist_2d_bin_widths_second_dim_iron,
+    const float* hist_2d_probability_table_concrete,
+    const int* hist_2d_alias_table_concrete,
+    const float* hist_2d_bin_centers_first_dim_concrete,
+    const float* hist_2d_bin_centers_second_dim_concrete,
+    const float* hist_2d_bin_widths_first_dim_concrete,
+    const float* hist_2d_bin_widths_second_dim_concrete,
+    curandState* state,
+    float* delta,
+    float* delta_second_dim)
+{
+    *delta = 0.0f;
+    *delta_second_dim = 0.0f;
+    if (material == MATERIAL_IRON) {
+        int bin_idx;
+        int tbin = curand(state) % H_2d;
+
+        if (rand_value < hist_2d_probability_table_iron[tbin+hist_idx*H_2d])
+            bin_idx = tbin;
+        else
+            bin_idx =  hist_2d_alias_table_iron[tbin+hist_idx*H_2d];
+        // 3. Retrieve the bin value and add it to muon_valu
+        float bin_value_first_dim = hist_2d_bin_centers_first_dim_iron[bin_idx]; // Initialize bin_value at the bin center
+        float bin_jitter_first_dim = (curand_uniform(state) - 0.5f) * hist_2d_bin_widths_first_dim_iron[bin_idx]; // Calculate jitter in range [-bin_width/2, bin_width/2]
+        bin_value_first_dim += bin_jitter_first_dim; // Apply jitter to the bin value
+
+        float bin_value_second_dim = hist_2d_bin_centers_second_dim_iron[bin_idx]; // Initialize bin_value at the bin center
+        float bin_jitter_second_dim = (curand_uniform(state) - 0.5f) * hist_2d_bin_widths_second_dim_iron[bin_idx]; // Calculate jitter in range [-bin_width/2, bin_width/2]
+        bin_value_second_dim += bin_jitter_second_dim; // Apply jitter to the bin value
+
+        *delta = mag_P * exp(bin_value_first_dim);
+        *delta_second_dim = mag_P * exp(bin_value_second_dim);
+    }
+    else if (material == MATERIAL_CONCRETE) {
+        int bin_idx;
+        int tbin = curand(state) % H_2d;
+
+        if (rand_value < hist_2d_probability_table_concrete[tbin+hist_idx*H_2d])
+            bin_idx = tbin;
+        else
+            bin_idx =  hist_2d_alias_table_concrete[tbin+hist_idx*H_2d];
+        float bin_value_first_dim = hist_2d_bin_centers_first_dim_concrete[bin_idx]; // Initialize bin_value at the bin center
+        float bin_jitter_first_dim = (curand_uniform(state) - 0.5f) * hist_2d_bin_widths_first_dim_concrete[bin_idx]; // Calculate jitter in range [-bin_width/2, bin_width/2]
+        bin_value_first_dim += bin_jitter_first_dim; // Apply jitter to the bin value
+
+        float bin_value_second_dim = hist_2d_bin_centers_second_dim_concrete[bin_idx]; // Initialize bin_value at the bin center
+        float bin_jitter_second_dim = (curand_uniform(state) - 0.5f) * hist_2d_bin_widths_second_dim_concrete[bin_idx]; // Calculate jitter in range [-bin_width/2, bin_width/2]
+
+
+        bin_value_second_dim += bin_jitter_second_dim; // Apply jitter to the bin value
+
+        *delta = mag_P * expf(bin_value_first_dim);
+        *delta_second_dim = mag_P * expf(bin_value_second_dim);
+    }
+}
+
+
+// AIS sample-only kernel: at each muon's CURRENT (position, momentum) draw the scatter
+// magnitudes (Δp_z -> dpz_out, pt -> dsd_out) from the alias histograms WITHOUT moving the
+// muon. The companion propagate kernel then applies the agent's azimuth using these as
+// dpz_in / dsd_in. The RNG draw order matches the propagate kernel exactly, so for a given
+// (seed, idx) the magnitudes are identical to what the propagate kernel would have sampled.
+__global__ void cuda_sample_scatter_uniform_field_k(
+    const float* muon_data_positions,
+    const float* muon_data_momenta,
+    const float* hist_2d_probability_table_iron,
+    const int* hist_2d_alias_table_iron,
+    const float* hist_2d_bin_centers_first_dim_iron,
+    const float* hist_2d_bin_centers_second_dim_iron,
+    const float* hist_2d_bin_widths_first_dim_iron,
+    const float* hist_2d_bin_widths_second_dim_iron,
+    const float* hist_2d_probability_table_concrete,
+    const int* hist_2d_alias_table_concrete,
+    const float* hist_2d_bin_centers_first_dim_concrete,
+    const float* hist_2d_bin_centers_second_dim_concrete,
+    const float* hist_2d_bin_widths_first_dim_concrete,
+    const float* hist_2d_bin_widths_second_dim_concrete,
+    const int N,
+    const int H_2d,
+    const ARB8_Data* arb8s,
+    const int* hashed3d_arb8s_cells,
+    const int* hashed3d_arb8s_indices,
+    const ZGridMeta grid_meta,
+    const float* cavern_params,
+    int seed,
+    float* dpz_out,
+    float* dsd_out)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+
+    curandState state;
+    curand_init(seed, idx, 0, &state);
+
+    int offset = idx * 3;
+    float mom[3] = {muon_data_momenta[offset+0], muon_data_momenta[offset+1], muon_data_momenta[offset+2]};
+    float pos[3] = {muon_data_positions[offset+0], muon_data_positions[offset+1], muon_data_positions[offset+2]};
+
+    float mag_P = norm(mom);
+    int hist_idx = get_first_bin(mag_P);
+    float rand_value = curand_uniform(&state);
+
+    int current_arb8_idx;
+    MaterialType material = get_material_with_arb8_idx(
+        pos[0], pos[1], pos[2],
+        arb8s,
+        hashed3d_arb8s_cells,
+        hashed3d_arb8s_indices,
+        cavern_params,
+        grid_meta,
+        &current_arb8_idx
+    );
+
+    float delta = 0.0f;
+    float delta_second_dim = 0.0f;
+    sample_scatter_magnitudes(
+        mag_P, hist_idx, material, rand_value, H_2d,
+        hist_2d_probability_table_iron, hist_2d_alias_table_iron,
+        hist_2d_bin_centers_first_dim_iron, hist_2d_bin_centers_second_dim_iron,
+        hist_2d_bin_widths_first_dim_iron, hist_2d_bin_widths_second_dim_iron,
+        hist_2d_probability_table_concrete, hist_2d_alias_table_concrete,
+        hist_2d_bin_centers_first_dim_concrete, hist_2d_bin_centers_second_dim_concrete,
+        hist_2d_bin_widths_first_dim_concrete, hist_2d_bin_widths_second_dim_concrete,
+        &state, &delta, &delta_second_dim);
+
+    dpz_out[idx] = delta;
+    dsd_out[idx] = delta_second_dim;
+}
+
+
 __global__ void cuda_propagate_muons_uniform_field_k(float* muon_data_positions,
                                float* muon_data_momenta,
                                const float* charges,
@@ -136,7 +282,10 @@ __global__ void cuda_propagate_muons_uniform_field_k(float* muon_data_positions,
                                const float* cavern_params,
                                int num_steps,
                                float step_length_fixed,
-                               int seed)
+                               int seed,
+                               const float* phi_in,
+                               const float* dpz_in,
+                               const float* dsd_in)
                                {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
@@ -184,52 +333,34 @@ __global__ void cuda_propagate_muons_uniform_field_k(float* muon_data_positions,
             &current_arb8_idx
         );
 
+        // AIS hook: if pre-sampled magnitudes are supplied (dsd_in != nullptr) use them and
+        // skip the histogram draw entirely; otherwise sample (delta, delta_second_dim) from the
+        // alias histograms exactly as before. Pre-sampled inputs are indexed per-muon and are
+        // intended for num_steps == 1 (the AIS rollout supplies one sample per step via the
+        // companion sample-only kernel). `rand_value` is still drawn above so the in-kernel
+        // (dsd_in == nullptr) path keeps its original RNG stream.
         float delta = 0.0f;
         float delta_second_dim = 0.0f;
-        if (material == MATERIAL_IRON) {
-            int bin_idx;
-            int tbin = curand(&state) % H_2d;
-
-            if (rand_value < hist_2d_probability_table_iron[tbin+hist_idx*H_2d])
-                bin_idx = tbin;
-            else
-                bin_idx =  hist_2d_alias_table_iron[tbin+hist_idx*H_2d];
-            // 3. Retrieve the bin value and add it to muon_valu
-            float bin_value_first_dim = hist_2d_bin_centers_first_dim_iron[bin_idx]; // Initialize bin_value at the bin center
-            float bin_jitter_first_dim = (curand_uniform(&state) - 0.5f) * hist_2d_bin_widths_first_dim_iron[bin_idx]; // Calculate jitter in range [-bin_width/2, bin_width/2]
-            bin_value_first_dim += bin_jitter_first_dim; // Apply jitter to the bin value
-
-            float bin_value_second_dim = hist_2d_bin_centers_second_dim_iron[bin_idx]; // Initialize bin_value at the bin center
-            float bin_jitter_second_dim = (curand_uniform(&state) - 0.5f) * hist_2d_bin_widths_second_dim_iron[bin_idx]; // Calculate jitter in range [-bin_width/2, bin_width/2]
-            bin_value_second_dim += bin_jitter_second_dim; // Apply jitter to the bin value
-
-            delta = mag_P * exp(bin_value_first_dim);
-            delta_second_dim = mag_P * exp(bin_value_second_dim);
-        }
-        else if (material == MATERIAL_CONCRETE) {
-            int bin_idx;
-            int tbin = curand(&state) % H_2d;
-
-            if (rand_value < hist_2d_probability_table_concrete[tbin+hist_idx*H_2d])
-                bin_idx = tbin;
-            else
-                bin_idx =  hist_2d_alias_table_concrete[tbin+hist_idx*H_2d];
-            float bin_value_first_dim = hist_2d_bin_centers_first_dim_concrete[bin_idx]; // Initialize bin_value at the bin center
-            float bin_jitter_first_dim = (curand_uniform(&state) - 0.5f) * hist_2d_bin_widths_first_dim_concrete[bin_idx]; // Calculate jitter in range [-bin_width/2, bin_width/2]
-            bin_value_first_dim += bin_jitter_first_dim; // Apply jitter to the bin value
-
-            float bin_value_second_dim = hist_2d_bin_centers_second_dim_concrete[bin_idx]; // Initialize bin_value at the bin center
-            float bin_jitter_second_dim = (curand_uniform(&state) - 0.5f) * hist_2d_bin_widths_second_dim_concrete[bin_idx]; // Calculate jitter in range [-bin_width/2, bin_width/2]
-            
-            
-            bin_value_second_dim += bin_jitter_second_dim; // Apply jitter to the bin value
-
-            delta = mag_P * expf(bin_value_first_dim);
-            delta_second_dim = mag_P * expf(bin_value_second_dim);
-
+        if (dsd_in != nullptr) {
+            delta = dpz_in[idx];
+            delta_second_dim = dsd_in[idx];
+        } else {
+            sample_scatter_magnitudes(
+                mag_P, hist_idx, material, rand_value, H_2d,
+                hist_2d_probability_table_iron, hist_2d_alias_table_iron,
+                hist_2d_bin_centers_first_dim_iron, hist_2d_bin_centers_second_dim_iron,
+                hist_2d_bin_widths_first_dim_iron, hist_2d_bin_widths_second_dim_iron,
+                hist_2d_probability_table_concrete, hist_2d_alias_table_concrete,
+                hist_2d_bin_centers_first_dim_concrete, hist_2d_bin_centers_second_dim_concrete,
+                hist_2d_bin_widths_first_dim_concrete, hist_2d_bin_widths_second_dim_concrete,
+                &state, &delta, &delta_second_dim);
         }
 
-        float phi = curand_uniform(&state) * 2 * M_PI;
+        // AIS hook: use the externally supplied azimuth (phi_in) if provided,
+        // otherwise fall back to the nominal uniform draw. The histogram magnitude
+        // sampling above (delta, delta_second_dim) is left untouched in both cases.
+        // NOTE: phi_in is indexed per-muon (phi_in[idx]); intended for num_steps == 1.
+        float phi = (phi_in != nullptr) ? phi_in[idx] : (curand_uniform(&state) * 2 * M_PI);
 
         // Convert polar coordinates to Cartesian coordinates
         float x = delta_second_dim * __cosf(phi);
@@ -304,7 +435,10 @@ void propagate_muons_with_alias_sampling_cuda_uniform_field(
     float kill_at,
     int num_steps,
     float step_length_fixed,
-    int seed
+    int seed,
+    const float* phi_in,
+    const float* dpz_in,
+    const float* dsd_in
 ) {
     TORCH_CHECK(material_histograms.size() >= 2, "Expected at least 2 materials (iron and concrete)");
     
@@ -331,6 +465,8 @@ void propagate_muons_with_alias_sampling_cuda_uniform_field(
     cudaMemcpyToSymbol(LOG_START, &log_start_val, sizeof(float));
     cudaMemcpyToSymbol(LOG_STOP, &log_stop_val, sizeof(float));
     cudaMemcpyToSymbol(INV_LOG_STEP, &inv_log_step_val, sizeof(float));
+    int max_momentum_bin_val = static_cast<int>(N_momentum_bins) - 1;
+    cudaMemcpyToSymbol(MAX_MOMENTUM_BIN, &max_momentum_bin_val, sizeof(int));
 
     const int N_arbs = arb8s.size(0);
     const bool has_arb8 = (N_arbs > 0);
@@ -410,7 +546,126 @@ void propagate_muons_with_alias_sampling_cuda_uniform_field(
         cavern_params.data_ptr<float>(),
         num_steps,
         step_length_fixed,
-        seed
+        seed,
+        phi_in,
+        dpz_in,
+        dsd_in
+    );
+
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    if (arb8s_device != nullptr) {
+        cudaFree(arb8s_device);
+    }
+}
+
+
+// Host launcher for the AIS sample-only kernel. Mirrors the geometry/constant-memory setup of
+// propagate_muons_with_alias_sampling_cuda_uniform_field but launches the sample-only kernel
+// (one draw per muon, no movement) and writes the magnitudes into dpz_out / dsd_out.
+void sample_scatter_cuda_uniform_field(
+    torch::Tensor muon_data_positions,
+    torch::Tensor muon_data_momenta,
+    const std::vector<MaterialHistograms>& material_histograms,
+    torch::Tensor arb8s,
+    torch::Tensor hashed3d_arb8s_cells,
+    torch::Tensor hashed3d_arb8s_indices,
+    torch::Tensor arb8s_fields,
+    torch::Tensor cavern_params,
+    bool use_symmetry,
+    int seed,
+    float* dpz_out,
+    float* dsd_out
+) {
+    TORCH_CHECK(material_histograms.size() >= 2, "Expected at least 2 materials (iron and concrete)");
+
+    const auto& iron = material_histograms[0];
+    const auto& concrete = material_histograms[1];
+
+    TORCH_CHECK(arb8s_fields.size(0) == arb8s.size(0), "arb8s_fields must have the same number of ARB8s as arb8s");
+    TORCH_CHECK(arb8s_fields.size(1) == 3, "arb8s_fields must have shape (N, 3) for [Bx, By, Bz]");
+
+    const auto N = muon_data_positions.size(0);
+    const auto H_2D = iron.probability_table.size(1);
+    const auto N_momentum_bins = iron.probability_table.size(0);
+
+    cudaMemcpyToSymbol(_use_symmetry, &use_symmetry, sizeof(bool));
+
+    const int threads_per_block = BLOCK_SIZE;
+    const int num_blocks = (N + threads_per_block - 1) / threads_per_block;
+
+    float log_start_val = log10f(0.18f);
+    float log_stop_val = log10f(400.0f);
+    float inv_log_step_val = N_momentum_bins / (log_stop_val - log_start_val);
+    cudaMemcpyToSymbol(LOG_START, &log_start_val, sizeof(float));
+    cudaMemcpyToSymbol(LOG_STOP, &log_stop_val, sizeof(float));
+    cudaMemcpyToSymbol(INV_LOG_STEP, &inv_log_step_val, sizeof(float));
+    int max_momentum_bin_val = static_cast<int>(N_momentum_bins) - 1;
+    cudaMemcpyToSymbol(MAX_MOMENTUM_BIN, &max_momentum_bin_val, sizeof(int));
+
+    const int N_arbs = arb8s.size(0);
+    const bool has_arb8 = (N_arbs > 0);
+    float z_min = 0.0f;
+    float z_max = 30.0f;
+    ARB8_Data* arb8s_device = nullptr;
+
+    if (has_arb8) {
+        auto z_neg_vals = arb8s.select(1, 0).select(1, 2);
+        auto z_pos_vals = arb8s.select(1, 4).select(1, 2);
+        z_min = std::min(z_neg_vals.min().item<float>(), z_pos_vals.min().item<float>());
+        z_max = std::max(z_neg_vals.max().item<float>(), z_pos_vals.max().item<float>());
+        z_max = std::max(z_max, 30.0f);
+
+        cudaMalloc(&arb8s_device, N_arbs * sizeof(ARB8_Data));
+        const int threads = 256;
+        const int blocks = (N_arbs + threads - 1) / threads;
+        fill_arb8s_with_fields_kernel<<<blocks, threads>>>(
+            arb8s.data_ptr<float>(),
+            arb8s_fields.data_ptr<float>(),
+            arb8s_device,
+            N_arbs
+        );
+    }
+
+    const int sz = hashed3d_arb8s_cells.size(0) - 1;
+    ZGridMeta grid_data;
+    grid_data.sz = sz;
+    grid_data.z_min_global = z_min;
+    grid_data.z_max_global = z_max;
+    float z_span = z_max - z_min;
+    if (z_span <= 0.0f) {
+        z_span = 1.0f;
+    }
+    grid_data.z_cell_height_inv = (float)sz / z_span;
+    cudaMemcpyToSymbol(d_grid_meta, &grid_data, sizeof(ZGridMeta));
+
+    cudaDeviceSynchronize();
+
+    cuda_sample_scatter_uniform_field_k<<<num_blocks, threads_per_block>>>(
+        muon_data_positions.data_ptr<float>(),
+        muon_data_momenta.data_ptr<float>(),
+        iron.probability_table.data_ptr<float>(),
+        iron.alias_table.data_ptr<int>(),
+        iron.bin_centers_first_dim.data_ptr<float>(),
+        iron.bin_centers_second_dim.data_ptr<float>(),
+        iron.bin_widths_first_dim.data_ptr<float>(),
+        iron.bin_widths_second_dim.data_ptr<float>(),
+        concrete.probability_table.data_ptr<float>(),
+        concrete.alias_table.data_ptr<int>(),
+        concrete.bin_centers_first_dim.data_ptr<float>(),
+        concrete.bin_centers_second_dim.data_ptr<float>(),
+        concrete.bin_widths_first_dim.data_ptr<float>(),
+        concrete.bin_widths_second_dim.data_ptr<float>(),
+        N,
+        H_2D,
+        arb8s_device,
+        hashed3d_arb8s_cells.data_ptr<int>(),
+        hashed3d_arb8s_indices.data_ptr<int>(),
+        grid_data,
+        cavern_params.data_ptr<float>(),
+        seed,
+        dpz_out,
+        dsd_out
     );
 
     CUDA_CHECK(cudaGetLastError());

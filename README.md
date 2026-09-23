@@ -47,7 +47,12 @@ In [data](data), one can already find the histograms for some materials. If you 
 
 ## Running a simulation
 
-   One can launch the main simulator by simply running
+   `project/cuda_muons` is a Python package and its modules use relative imports, so the
+   main simulator and the scripts under `experiments/` are run as modules **from the repo
+   root** (not as bare files from inside this directory):
      ```
-     python3 cuda_muons.py
+     uv run -m project.cuda_muons.cuda_muons
+     uv run -m project.cuda_muons.experiments.validate_muon_env
      ```
+   (The data-sampling helpers under `utils_cuda_muons/` are still run from inside this
+   directory, e.g. `python3 utils_cuda_muons/build_histograms.py --alias --material G4_Fe`.)

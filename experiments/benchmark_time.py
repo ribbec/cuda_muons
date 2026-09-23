@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 import os
-from cuda_muons import propagate_muons_with_cuda, get_corners_from_detector, get_design_from_params, params_lib, get_cavern
+from ..cuda_muons import propagate_muons_with_cuda, get_corners_from_detector, get_design_from_params, params_lib, get_cavern
 import torch    
 import h5py
 import time
@@ -172,9 +172,11 @@ if __name__ == "__main__":
     output_data = (n_muons_list, times_cuda, times_g4_parallel, times_g4)
     for n, t_cuda, t_g4_parallel, t_g4 in zip(n_muons_list, times_cuda, times_g4_parallel, times_g4):
         print(f"Muons: {int(n):>10}, CUDA Time: {t_cuda:.2f} s, Geant4 Time: {t_g4:.2f} s, Geant4 Parallel Time: {t_g4_parallel:.2f} s")
-    with open(os.path.join('data', args.output_file), 'wb') as f:
+    _bench_out_dir = '/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons'
+    os.makedirs(_bench_out_dir, exist_ok=True)
+    with open(os.path.join(_bench_out_dir, args.output_file), 'wb') as f:
         pickle.dump(output_data, f)
-    print(f"Benchmark times saved to {os.path.join('data', args.output_file)}")
+    print(f"Benchmark times saved to {os.path.join(_bench_out_dir, args.output_file)}")
 
     
 

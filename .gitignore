@@ -18,3 +18,11 @@ data/*.npy
 data/*.h5
 experiments/plots/*
 *.egg-info
+
+# Build outputs: the container image and the built wheel are large and
+# regenerable (cuda12.8-build.def / install_cuda.sh). The .def itself is tracked.
+dist/*.sif
+dist/*.whl
+
+# Fitted beam models are inputs, not outputs: keep them tracked despite data/*.pkl.
+!data/gmm/*.pkl

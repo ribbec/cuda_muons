@@ -17,7 +17,7 @@ material = args.material
 # Ensure all necessary directories exist
 
 
-os.makedirs("plots/hists_geant4", exist_ok=True)
+os.makedirs("/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons/plots/hists_geant4", exist_ok=True)
 
 def compute_2d_histo(array_a, array_b, edges_a, edges_b):
     t1 = time.time()
@@ -148,7 +148,7 @@ with h5py.File(h5_filename, 'r') as f:
             ax[1].set_yscale('log')
             
             print("Plotting...")
-            plt.savefig(f'plots/hists_geant4/{energy_seg[0]}-{energy_seg[1]}_dpz_{material}.pdf', bbox_inches='tight')
+            plt.savefig(f'/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons/plots/hists_geant4/{energy_seg[0]}-{energy_seg[1]}_dpz_{material}.pdf', bbox_inches='tight')
             plt.close()
 
 # Save histograms

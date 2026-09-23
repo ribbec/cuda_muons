@@ -6,7 +6,7 @@ import os
 from muon_slabs import simulate_muon, initialize, kill_secondary_tracks, collect_from_sensitive
 import json
 import lib.gigantic_sphere as sphere_design
-from cuda_muons import propagate_muons_with_cuda
+from ..cuda_muons import propagate_muons_with_cuda
 import argparse
 import multiprocessing as mp
 import torch    
@@ -122,8 +122,10 @@ def propagate_muons_until_z(px,py,pz,x,y,z, z_target:float):
     return x,y,z
 
 def main(muons, n_steps=500, mag_field=[0., 0., 0.], material = 'G4_Fe'):
-    file_cuda = 'data/outputs_cuda.pkl'
-    file_geant4 = 'data/outputs_geant4.pkl'
+    _out_dir = '/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons'
+    os.makedirs(_out_dir, exist_ok=True)
+    file_cuda = os.path.join(_out_dir, 'outputs_cuda.pkl')
+    file_geant4 = os.path.join(_out_dir, 'outputs_geant4.pkl')
     outputs_cuda = run_cuda_simulation(muons, mag_field = mag_field, histogram_dir=f'data/', n_steps=n_steps, material=material)
     n_cores = 90
     muons_split = np.array_split(muons, n_cores)
@@ -439,8 +441,8 @@ if __name__ == "__main__":
     parser.add_argument('--load_data', action='store_true', help='Load existing data instead of running simulations')
     parser.add_argument('--initial_momenta', type=float, default=195., help='Initial momenta of muons in GeV/c')
     parser.add_argument('--output_filename', type=str, default='histograms_comparison_geant4_cuda.png', help='Output filename for the histogram plot')
-    parser.add_argument('--file_name_g4', type=str, help='Path to GEANT4 HDF5 file', default='../data/outputs/results/final_concatenated_results.h5')
-    parser.add_argument('--file_name_cuda', type=str, help='Path to CUDA pickle file', default =  '../data/outputs/outputs_cuda.pkl')
+    parser.add_argument('--file_name_g4', type=str, help='Path to GEANT4 HDF5 file', default='/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons/outputs_geant4.pkl')
+    parser.add_argument('--file_name_cuda', type=str, help='Path to CUDA pickle file', default='/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons/outputs_cuda.pkl')
     parser.add_argument('--density', action='store_true', help='Plot histograms with density normalization')
     parser.add_argument('--filter_p', type=float, nargs=2, default=[0.0, 500.0], help='Thresholds to filter muons by min_p <= |P| <= max_p')
     parser.add_argument('--sens_plane', action='store_true', help='Apply sensitive plane cut (|x|<2, |y|<3)')
@@ -514,7 +516,8 @@ if __name__ == "__main__":
         weights_cuda = data_cuda['weight']
         print('TOTAL sum of weights CUDA:', np.sum(weights_cuda))
 
-    output_filename = os.path.join('/home/hep/lprate/projects/MuonsAndMatter/cuda_muons/plots', args.output_filename)
+    os.makedirs('/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons', exist_ok=True)
+    output_filename = os.path.join('/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons', args.output_filename)
     plot_histograms(output_filename, 
                 px_g4, py_g4, pz_g4, x_g4, y_g4, z_g4,
                 px_cuda, py_cuda, pz_cuda, x_cuda, y_cuda, z_cuda,
@@ -550,9 +553,9 @@ if __name__ == "__main__":
         plt.legend(fontsize=14)
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig(os.path.join('/home/hep/lprate/projects/MuonsAndMatter/cuda_muons/plots', 'pz_comparison_geant4_cuda.png'))
+        plt.savefig(os.path.join('/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons', 'pz_comparison_geant4_cuda.png'))
         plt.close()
-        print("Plot saved to ", os.path.join('/home/hep/lprate/projects/MuonsAndMatter/cuda_muons/plots', 'pz_comparison_geant4_cuda.png'))
+        print("Plot saved to ", os.path.join('/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons', 'pz_comparison_geant4_cuda.png'))
 
         
         bins = np.linspace(min(np.min(np.log(pt_g4)), np.min(np.log(pt_cuda))), 0.1, 200)
@@ -565,7 +568,7 @@ if __name__ == "__main__":
         plt.legend(fontsize=14)
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig(os.path.join('/home/hep/lprate/projects/MuonsAndMatter/cuda_muons/plots', 'log_pt_comparison_geant4_cuda.png'))
+        plt.savefig(os.path.join('/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons', 'log_pt_comparison_geant4_cuda.png'))
         plt.close()
 
         bins = np.linspace(min(np.min(pt_g4), np.min(pt_cuda)), max(np.max(pt_g4), np.max(pt_cuda)), 200)
@@ -578,7 +581,7 @@ if __name__ == "__main__":
         plt.legend(fontsize=14)
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig(os.path.join('/home/hep/lprate/projects/MuonsAndMatter/cuda_muons/plots', 'pt_comparison_geant4_cuda.png'))
+        plt.savefig(os.path.join('/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons', 'pt_comparison_geant4_cuda.png'))
         plt.close()
 
 
