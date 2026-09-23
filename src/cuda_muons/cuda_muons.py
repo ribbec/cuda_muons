@@ -476,7 +476,7 @@ if __name__ == '__main__':
     parser.add_argument("-params", type=str, default='tokanut_v5.txt', help="Magnet parameters configuration - name or file path. If 'input', will prompt for input.")
     parser.add_argument('--gpu', dest='gpu', type=int, default=0,
                         help='GPU index to use (e.g., 0, 1, ...).')
-    parser.add_argument("-save_dir", type=str, default='/disk/users/cribbe/workspace/ship_rl/logs/cuda_muons')
+    parser.add_argument("-save_dir", type=str, default='outputs')
     args = parser.parse_args()
     
     if args.params == 'input':
